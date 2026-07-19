@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Asteroid Dodger</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background: #05060f;
+    height: 100%;
+    width: 100%;
+  }
+  canvas {
+    display: block;
+    background: radial-gradient(ellipse at 50% 50%, #0a0e23 0%, #05060f 100%);
+  }
+  #hud {
+    position: fixed;
+    top: 12px;
+    left: 16px;
+    color: #d8e6ff;
+    font-family: 'Courier New', monospace;
+    font-size: 18px;
+    text-shadow: 0 0 6px rgba(120,170,255,0.8);
+    user-select: none;
+  }
+  #overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-family: 'Courier New', monospace;
+    text-align: center;
+    background: rgba(0,0,0,0.55);
+    text-shadow: 0 0 8px rgba(150,190,255,0.9);
+  }
+  #overlay h1 {
+    font-size: 48px;
+    margin: 0 0 12px 0;
+    letter-spacing: 2px;
+  }
+  #overlay p {
+    font-size: 18px;
+    margin: 6px 0;
+  }
+  #overlay .hint {
+    margin-top: 24px;
+    font-size: 16px;
+    opacity: 0.85;
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud"></div>
+<div id="overlay">
+  <h1>ASTEROID DODGER</h1>
+  <p>Move with Arrow Keys or WASD.</p>
+  <p>Fly off one edge, warp in from the other.</p>
+  <p>Dodge the asteroids as long as you can.</p>
+  <p class="hint">Press any key or click to start</p>
+</div>
+
+<script>
+(function () {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const hud = document.getElementById('hud');
+  const overlay = document.getElementById('overlay');
+
+  let state = 'idle'; // 'idle' | 'playing' | 'gameover'
+  let ship, asteroids, elapsed, spawnTimer, lastTime, bestScore;
+  const keys = {};
+
+  let width, height;
+  function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+    if (ship) {
+      ship.x = Math.min(Math.max(ship.x, 0), width);
+      ship.y = Math.min(Math.max(ship.y, 0), height);
+    }
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const SHIP_SIZE = 22;
+  const SHIP_SPEED = 320; // px/sec
+  const SHIP_COLLISION_FACTOR = 0.85; // fraction of SHIP_SIZE used as hit radius
+  const SPAWN_INTERVAL_START = 1200; // ms
+  const SPAWN_INTERVAL_MIN = 200; // ms
+  const SPAWN_RAMP_DURATION = 45000; // ms to reach min interval
+  const SPEED_RAMP_DURATION = 45000; // ms to reach max speed multiplier
+  const SPEED_MULTIPLIER_MAX = 2.5;
+  const MAX_ASTEROIDS = 200; // defensive cap on concurrent asteroids
+  const ASTEROID_MIN_RADIUS = 14;
+  const ASTEROID_RADIUS_RANGE = 40;
+  const ASTEROID_MIN_SPEED = 90;
+  const ASTEROID_SPEED_RANGE = 90;
+  const ASTEROID_SIZE_SPEED_REF = 55; // reference radius for the size/speed curve
+  const ASTEROID_SIZE_SPEED_EXP = 0.4;
+  const ASTEROID_DESPAWN_MARGIN = 50; // px below screen before removal
+  const ASTEROID_SPIKES = 8;
+  const ASTEROID_JITTER_BASE = 0.75;
+  const ASTEROID_JITTER_AMP = 0.25;
+
+  bestScore = 0;
+
+  function resetGame() {
+    ship = {
+      x: width / 2,
+      y: height / 2,
+      angle: 0,
+    };
+    asteroids = [];
+    elapsed = 0;
+    spawnTimer = 0;
+    lastTime = null;
+  }
+
+  function currentSpawnInterval() {
+    const t = Math.min(elapsed / SPAWN_RAMP_DURATION, 1);
+    return SPAWN_INTERVAL_START + (SPAWN_INTERVAL_MIN - SPAWN_INTERVAL_START) * t;
+  }
+
+  function currentSpeedMultiplier() {
+    const t = Math.min(elapsed / SPEED_RAMP_DURATION, 1);
+    return 1 + (SPEED_MULTIPLIER_MAX - 1) * t;
+  }
+
+  function spawnAsteroid() {
+    if (asteroids.length >= MAX_ASTEROIDS) return;
+    const radius = ASTEROID_MIN_RADIUS + Math.random() * ASTEROID_RADIUS_RANGE;
+    // smaller asteroids fall a bit faster, larger a bit slower
+    const baseSpeed = ASTEROID_MIN_SPEED + Math.random() * ASTEROID_SPEED_RANGE;
+    const speed = baseSpeed * (ASTEROID_SIZE_SPEED_REF / radius) ** ASTEROID_SIZE_SPEED_EXP;
+    const y = -radius;
+    const asteroid = {
+      x: Math.random() * width,
+      y,
+      prevY: y,
+      radius,
+      speed,
+      rotation: Math.random() * Math.PI * 2,
+      rotSpeed: (Math.random() - 0.5) * 1.5,
+      wobbleSeed: Math.random() * 1000,
+    };
+    asteroid.points = asteroidPoints(asteroid);
+    asteroids.push(asteroid);
+  }
+
+  function updateShip(dt) {
+    let dx = 0, dy = 0;
+    if (keys['ArrowLeft'] || keys['a'] || keys['A']) dx -= 1;
+    if (keys['ArrowRight'] || keys['d'] || keys['D']) dx += 1;
+    if (keys['ArrowUp'] || keys['w'] || keys['W']) dy -= 1;
+    if (keys['ArrowDown'] || keys['s'] || keys['S']) dy += 1;
+
+    if (dx !== 0 || dy !== 0) {
+      const len = Math.hypot(dx, dy);
+      dx /= len;
+      dy /= len;
+      ship.x += dx * SHIP_SPEED * dt;
+      ship.y += dy * SHIP_SPEED * dt;
+      ship.angle = Math.atan2(dy, dx);
+    }
+
+    // warp / wrap-around
+    if (ship.x < -SHIP_SIZE) ship.x = width + SHIP_SIZE;
+    if (ship.x > width + SHIP_SIZE) ship.x = -SHIP_SIZE;
+    if (ship.y < -SHIP_SIZE) ship.y = height + SHIP_SIZE;
+    if (ship.y > height + SHIP_SIZE) ship.y = -SHIP_SIZE;
+  }
+
+  function updateAsteroids(dt) {
+    const speedMultiplier = currentSpeedMultiplier();
+    for (const a of asteroids) {
+      a.prevY = a.y;
+      a.y += a.speed * speedMultiplier * dt;
+      a.rotation += a.rotSpeed * dt;
+    }
+    for (let i = asteroids.length - 1; i >= 0; i--) {
+      if (asteroids[i].y - asteroids[i].radius >= height + ASTEROID_DESPAWN_MARGIN) {
+        asteroids.splice(i, 1);
+      }
+    }
+  }
+
+  // Closest distance from the ship to the asteroid's straight-line path this
+  // frame (a vertical segment from prevY to y), so fast-moving asteroids
+  // can't tunnel through the ship between frames.
+  function distanceFromShipToAsteroidPath(a) {
+    const yMin = Math.min(a.prevY, a.y);
+    const yMax = Math.max(a.prevY, a.y);
+    const closestY = Math.min(Math.max(ship.y, yMin), yMax);
+    return Math.hypot(ship.x - a.x, ship.y - closestY);
+  }
+
+  function checkCollisions() {
+    const shipRadius = SHIP_SIZE * SHIP_COLLISION_FACTOR;
+    for (const a of asteroids) {
+      const dist = distanceFromShipToAsteroidPath(a);
+      if (dist < a.radius + shipRadius) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function drawShip() {
+    ctx.save();
+    ctx.translate(ship.x, ship.y);
+    ctx.rotate(ship.angle);
+    ctx.beginPath();
+    ctx.moveTo(SHIP_SIZE, 0);
+    ctx.lineTo(-SHIP_SIZE * 0.8, SHIP_SIZE * 0.7);
+    ctx.lineTo(-SHIP_SIZE * 0.4, 0);
+    ctx.lineTo(-SHIP_SIZE * 0.8, -SHIP_SIZE * 0.7);
+    ctx.closePath();
+    ctx.fillStyle = '#7fd8ff';
+    ctx.shadowColor = '#7fd8ff';
+    ctx.shadowBlur = 12;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function asteroidPoints(a) {
+    const pts = [];
+    for (let i = 0; i < ASTEROID_SPIKES; i++) {
+      const angle = (i / ASTEROID_SPIKES) * Math.PI * 2;
+      const jitter = ASTEROID_JITTER_BASE + ASTEROID_JITTER_AMP * Math.sin(a.wobbleSeed + i * 1.9);
+      pts.push({
+        x: Math.cos(angle) * a.radius * jitter,
+        y: Math.sin(angle) * a.radius * jitter,
+      });
+    }
+    return pts;
+  }
+
+  function drawAsteroid(a) {
+    ctx.save();
+    ctx.translate(a.x, a.y);
+    ctx.rotate(a.rotation);
+    const pts = a.points;
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.closePath();
+    ctx.fillStyle = '#8a7a6d';
+    ctx.strokeStyle = '#c9b8a8';
+    ctx.lineWidth = 2;
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, width, height);
+    for (const a of asteroids) drawAsteroid(a);
+    drawShip();
+  }
+
+  function updateHud() {
+    const seconds = (elapsed / 1000).toFixed(1);
+    hud.textContent = `Time: ${seconds}s   Best: ${(bestScore / 1000).toFixed(1)}s`;
+  }
+
+  function loop(timestamp) {
+    if (lastTime === null) lastTime = timestamp;
+    const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+    lastTime = timestamp;
+
+    if (state === 'playing') {
+      elapsed += dt * 1000;
+      spawnTimer += dt * 1000;
+      const interval = currentSpawnInterval();
+      while (spawnTimer >= interval) {
+        spawnTimer -= interval;
+        spawnAsteroid();
+      }
+
+      updateShip(dt);
+      updateAsteroids(dt);
+
+      if (checkCollisions()) {
+        endGame();
+      } else {
+        draw();
+        updateHud();
+      }
+    }
+
+    requestAnimationFrame(loop);
+  }
+
+  function startGame() {
+    resetGame();
+    state = 'playing';
+    overlay.classList.add('hidden');
+  }
+
+  function endGame() {
+    state = 'gameover';
+    bestScore = Math.max(bestScore, elapsed);
+    overlay.innerHTML = `
+      <h1>GAME OVER</h1>
+      <p>You survived ${(elapsed / 1000).toFixed(1)} seconds.</p>
+      <p>Best: ${(bestScore / 1000).toFixed(1)} seconds.</p>
+      <p class="hint">Press any key or click to try again</p>
+    `;
+    overlay.classList.remove('hidden');
+  }
+
+  function handleStartInput() {
+    if (state === 'idle' || state === 'gameover') {
+      startGame();
+    }
+  }
+
+  window.addEventListener('keydown', (e) => {
+    keys[e.key] = true;
+    handleStartInput();
+  });
+  window.addEventListener('keyup', (e) => {
+    keys[e.key] = false;
+  });
+  window.addEventListener('click', handleStartInput);
+
+  state = 'idle';
+  resetGame();
+  updateHud();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
