@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-This repository contains a single self-contained game: [index.html](index.html) — "Asteroid Dodger," a browser-based arcade game built with vanilla HTML5 Canvas and JavaScript. There is no build step, no package manager, and no external dependencies.
+This repository contains a single self-contained game: [index.html](index.html) — "Asteroid Dodger," a browser-based game built with vanilla HTML5 Canvas and JavaScript. There is no build step, no package manager, and no external dependencies.
 
 ## Running the game
 
